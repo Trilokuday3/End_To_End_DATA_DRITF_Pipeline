@@ -1,0 +1,18 @@
+pandas
+numpy
+scikit-learn
+evidently  
+fastapi     
+uvicorn     
+flask
+apache-airflow          # Uncomment ONLY if you need orchestration; see below for guidance
+matplotlib
+joblib     
+requests
+docker
+xgboost
+lightgbm
+catboost
+pyyaml
+loguru
+pytest
