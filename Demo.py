@@ -20,8 +20,12 @@ from urllib.parse import urlparse
 import mlflow
 import joblib
 import dagshub
+import matplotlib.pyplot as plt
+from scipy.stats import ks_2samp, chi2_contingency
+from evidently.report import Report
+from evidently.metrics import DataDriftPreset
 
-dagshub.init(repo_owner='Trilokuday3', repo_name='ML_Flow-dagshub', mlflow=True)
+dagshub.init(repo_owner='Trilokuday3', repo_name='End_To_End_DATA_DRITF_Pipeline-dagshub', mlflow=True)
 
 logging.basicConfig(level=logging.WARN)
 logger = logging.getLogger(__name__)
@@ -98,12 +102,13 @@ if __name__ == "__main__":
         "XGBoost": XGBClassifier
     }
 
+    os.makedirs("artifacts/drift_plots", exist_ok=True)
+
     for model_name, param_list in param_grid.items():
         for params in param_list:
             print(f"\n=== Running {model_name} with params: {params} ===\n")
 
             if model_name == "XGBoost":
-                # Enforce MLflow compatibility with no warnings
                 params = params.copy()
                 params["use_label_encoder"] = False
                 params["eval_metric"] = "logloss"
@@ -140,8 +145,55 @@ if __name__ == "__main__":
                 mlflow.log_metrics(metrics_dict)
 
                 # Save and log the model as artifact
-                os.makedirs("model_dir", exist_ok=True)
-                model_path = os.path.join("model_dir", f"{model_name}_{str(params).replace(' ', '').replace(':', '').replace(',', '_')}_model.pkl")
+                model_path = os.path.join("artifacts", f"{model_name}_{str(params).replace(' ', '').replace(':', '').replace(',', '_')}_model.pkl")
                 joblib.dump(model, model_path)
-                mlflow.log_artifact(model_path, artifact_path="model")
+                mlflow.log_artifact(model_path, artifact_path="artifacts")
                 os.remove(model_path)
+
+                # ---------- START DATA DRIFT BLOCK ----------
+                drift_results = []
+                drift_plots_dir = "artifacts/drift_plots"
+
+                # Numeric feature drift: KS test and density plots
+                for col in numeric_features:
+                    stat, p_value = ks_2samp(X_train[col], X_test[col])
+                    drift_results.append({
+                        'feature': col,
+                        'type': 'numeric',
+                        'statistic': stat,
+                        'p_value': p_value
+                    })
+                    # Plot and log the drift plot
+                    plt.figure()
+                    X_train[col].plot(kind='density', label='Train', legend=True)
+                    X_test[col].plot(kind='density', label='Test', legend=True)
+                    plt.title(f'Drift plot: {col}')
+                    plt.xlabel(col)
+                    plt.legend()
+                    drift_plot_path = os.path.join(drift_plots_dir, f"{model_name}_{col}_drift.png")
+                    plt.savefig(drift_plot_path)
+                    plt.close()
+                    mlflow.log_artifact(drift_plot_path, artifact_path="artifacts/drift_plots")
+
+                # Categorical feature drift: Chi-square test
+                for col in categorical_features:
+                    train_counts = X_train[col].value_counts()
+                    test_counts = X_test[col].value_counts()
+                    categories = list(set(train_counts.index).union(set(test_counts.index)))
+                    train_freqs = train_counts.reindex(categories, fill_value=0)
+                    test_freqs = test_counts.reindex(categories, fill_value=0)
+                    table = np.array([train_freqs, test_freqs])
+                    chi2, p_value, _, _ = chi2_contingency(table)
+                    drift_results.append({
+                        'feature': col,
+                        'type': 'categorical',
+                        'statistic': chi2,
+                        'p_value': p_value
+                    })
+
+                # Save drift report csv
+                drift_report_df = pd.DataFrame(drift_results)
+                drift_csv = os.path.join("artifacts", f"drift_report_{model_name}_{str(params).replace(' ', '').replace(':', '').replace(',', '_')}.csv")
+                drift_report_df.to_csv(drift_csv, index=False)
+                mlflow.log_artifact(drift_csv, artifact_path="artifacts")
+                # ---------- END DATA DRIFT BLOCK ----------
