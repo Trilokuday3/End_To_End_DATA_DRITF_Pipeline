@@ -70,50 +70,78 @@ if __name__ == "__main__":
         ]
     )
 
-    models = {
-        "LogisticRegression": LogisticRegression(max_iter=1000, random_state=42),
-        "RandomForest": RandomForestClassifier(n_estimators=100, random_state=42),
-        "XGBoost": XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
+    # Define parameter grids for each model
+    param_grid = {
+        "LogisticRegression": [
+            {"max_iter": 1000, "C": 1.0},
+            {"max_iter": 2000, "C": 0.5}
+        ],
+        "RandomForest": [
+            {"n_estimators": 100, "max_depth": 10},
+            {"n_estimators": 200, "max_depth": 20}
+        ],
+        "XGBoost": [
+            {"n_estimators": 100, "max_depth": 3, "learning_rate": 0.1},
+            {"n_estimators": 200, "max_depth": 4, "learning_rate": 0.05}
+        ]
     }
 
-    remote_server_uri = "https://dagshub.com/Trilokuday3/ML_Flow-dagshub.mlflow"
+    remote_server_uri = "https://dagshub.com/Trilokuday3/End_To_End_DATA_DRITF_Pipeline.mlflow"
     mlflow.set_tracking_uri(remote_server_uri)
 
-    # ----------- THIS IS THE KEY PART -----------
-    experiment_name = "TelcoChurnExperiments"
+    experiment_name = "TelcoChurnParamGridSearch"
     mlflow.set_experiment(experiment_name)
-    # --------------------------------------------
 
-    for model_name, classifier in models.items():
-        model = Pipeline(steps=[('preprocessor', preprocessor), ('classifier', classifier)])
-        with mlflow.start_run(run_name=model_name):
-            model.fit(X_train, y_train)
-            y_pred = model.predict(X_test)
-            y_prob = model.predict_proba(X_test)[:, 1]
+    model_map = {
+        "LogisticRegression": LogisticRegression,
+        "RandomForest": RandomForestClassifier,
+        "XGBoost": XGBClassifier
+    }
 
-            acc, rocauc, mse, rmse, mae, r2 = eval_metrics(y_test, y_pred, y_prob)
+    for model_name, param_list in param_grid.items():
+        for params in param_list:
+            print(f"\n=== Running {model_name} with params: {params} ===\n")
 
-            metrics_dict = {
-                "accuracy": acc,
-                "roc_auc": rocauc,
-                "mse": mse,
-                "rmse": rmse,
-                "mae": mae,
-                "r2": r2
-            }
-            print(f"{model_name} model results:")
-            for k, v in metrics_dict.items():
-                print(f"{k}: {v:.4f}")
-            print("Classification Report:\n", classification_report(y_test, y_pred))
-            print("Confusion Matrix:\n", confusion_matrix(y_test, y_pred))
+            if model_name == "XGBoost":
+                # Enforce MLflow compatibility with no warnings
+                params = params.copy()
+                params["use_label_encoder"] = False
+                params["eval_metric"] = "logloss"
+                params["random_state"] = 42
+            else:
+                params = params.copy()
+                params["random_state"] = 42
 
-            mlflow.log_param("model_type", model_name)
-            mlflow.log_params(classifier.get_params())
-            mlflow.log_metrics(metrics_dict)
+            classifier = model_map[model_name](**params)
+            model = Pipeline(steps=[('preprocessor', preprocessor), ('classifier', classifier)])
+            with mlflow.start_run(run_name=f"{model_name}_{params}"):
+                model.fit(X_train, y_train)
+                y_pred = model.predict(X_test)
+                y_prob = model.predict_proba(X_test)[:, 1]
 
-            # Save and log the model as artifact
-            os.makedirs("model_dir", exist_ok=True)
-            model_path = os.path.join("model_dir", f"{model_name}_model.pkl")
-            joblib.dump(model, model_path)
-            mlflow.log_artifact(model_path, artifact_path="model")
-            os.remove(model_path)
+                acc, rocauc, mse, rmse, mae, r2 = eval_metrics(y_test, y_pred, y_prob)
+
+                metrics_dict = {
+                    "accuracy": acc,
+                    "roc_auc": rocauc,
+                    "mse": mse,
+                    "rmse": rmse,
+                    "mae": mae,
+                    "r2": r2
+                }
+                print(f"{model_name} ({params}) model results:")
+                for k, v in metrics_dict.items():
+                    print(f"{k}: {v:.4f}")
+                print("Classification Report:\n", classification_report(y_test, y_pred))
+                print("Confusion Matrix:\n", confusion_matrix(y_test, y_pred))
+
+                mlflow.log_param("model_type", model_name)
+                mlflow.log_params(params)
+                mlflow.log_metrics(metrics_dict)
+
+                # Save and log the model as artifact
+                os.makedirs("model_dir", exist_ok=True)
+                model_path = os.path.join("model_dir", f"{model_name}_{str(params).replace(' ', '').replace(':', '').replace(',', '_')}_model.pkl")
+                joblib.dump(model, model_path)
+                mlflow.log_artifact(model_path, artifact_path="model")
+                os.remove(model_path)
