@@ -16,12 +16,14 @@ from sklearn.metrics import (
     accuracy_score, confusion_matrix, roc_auc_score,
     classification_report, mean_squared_error, mean_absolute_error, r2_score
 )
-from urllib.parse import urlparse
 import mlflow
 import joblib
 import dagshub
 
-dagshub.init(repo_owner='Trilokuday3', repo_name='ML_Flow-dagshub', mlflow=True)
+from evidently.dashboard import Dashboard
+from evidently.dashboard.tabs import DataDriftTab
+
+dagshub.init(repo_owner='Trilokuday3', repo_name='End_To_End_DATA_DRITF_Pipeline-dagshub', mlflow=True)
 
 logging.basicConfig(level=logging.WARN)
 logger = logging.getLogger(__name__)
@@ -98,12 +100,13 @@ if __name__ == "__main__":
         "XGBoost": XGBClassifier
     }
 
+    os.makedirs("artifacts", exist_ok=True)
+
     for model_name, param_list in param_grid.items():
         for params in param_list:
             print(f"\n=== Running {model_name} with params: {params} ===\n")
 
             if model_name == "XGBoost":
-                # Enforce MLflow compatibility with no warnings
                 params = params.copy()
                 params["use_label_encoder"] = False
                 params["eval_metric"] = "logloss"
@@ -114,6 +117,7 @@ if __name__ == "__main__":
 
             classifier = model_map[model_name](**params)
             model = Pipeline(steps=[('preprocessor', preprocessor), ('classifier', classifier)])
+
             with mlflow.start_run(run_name=f"{model_name}_{params}"):
                 model.fit(X_train, y_train)
                 y_pred = model.predict(X_test)
@@ -134,14 +138,24 @@ if __name__ == "__main__":
                     print(f"{k}: {v:.4f}")
                 print("Classification Report:\n", classification_report(y_test, y_pred))
                 print("Confusion Matrix:\n", confusion_matrix(y_test, y_pred))
-
                 mlflow.log_param("model_type", model_name)
                 mlflow.log_params(params)
                 mlflow.log_metrics(metrics_dict)
 
                 # Save and log the model as artifact
-                os.makedirs("model_dir", exist_ok=True)
-                model_path = os.path.join("model_dir", f"{model_name}_{str(params).replace(' ', '').replace(':', '').replace(',', '_')}_model.pkl")
+                model_path = os.path.join("artifacts", f"{model_name}_{str(params).replace(' ', '').replace(':', '').replace(',', '_')}_model.pkl")
                 joblib.dump(model, model_path)
-                mlflow.log_artifact(model_path, artifact_path="model")
+                mlflow.log_artifact(model_path, artifact_path="artifacts")
                 os.remove(model_path)
+
+                # ---------- START EVIDENTLY DATA DRIFT BLOCK ----------
+                drift_report_html = os.path.join(
+                    "artifacts", f"drift_report_{model_name}_{str(params).replace(' ', '').replace(':', '').replace(',', '_')}.html"
+                )
+
+                dashboard = Dashboard(tabs=[DataDriftTab()])
+                dashboard.calculate(reference_data=X_train, current_data=X_test)
+                dashboard.save(drift_report_html)
+
+                mlflow.log_artifact(drift_report_html, artifact_path="artifacts")
+                # ---------- END EVIDENTLY DATA DRIFT BLOCK ----------
