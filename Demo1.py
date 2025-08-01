@@ -1,9 +1,10 @@
 import os
-import warnings
 import sys
+import warnings
 import logging
-import pandas as pd
+import json
 import numpy as np
+import pandas as pd
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
@@ -20,11 +21,10 @@ import mlflow
 import joblib
 import dagshub
 
-from evidently.dashboard import Dashboard
-from evidently.dashboard.tabs import DataDriftTab
+from evidently import Report
+from evidently.metrics import ValueDrift
 
 dagshub.init(repo_owner='Trilokuday3', repo_name='End_To_End_DATA_DRITF_Pipeline-dagshub', mlflow=True)
-
 logging.basicConfig(level=logging.WARN)
 logger = logging.getLogger(__name__)
 
@@ -49,13 +49,17 @@ if __name__ == "__main__":
 
     numeric_features = ['tenure', 'MonthlyCharges', 'TotalCharges']
     categorical_features = df.drop(columns=numeric_features + ['Churn']).columns.tolist()
-
     X = df.drop(columns=['Churn'])
     y = df['Churn']
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
-    )
+    print('Full data shape:', X.shape, y.shape)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    print('Train shape:', X_train.shape, y_train.shape)
+    print('Test shape:', X_test.shape, y_test.shape)
+
+    if X_train.empty or X_test.empty:
+        print("ERROR: Train or test DataFrame is empty!")
+        sys.exit(1)
 
     numeric_transformer = Pipeline(steps=[
         ('imputer', SimpleImputer(strategy='mean')),
@@ -72,7 +76,6 @@ if __name__ == "__main__":
         ]
     )
 
-    # Define parameter grids for each model
     param_grid = {
         "LogisticRegression": [
             {"max_iter": 1000, "C": 1.0},
@@ -90,22 +93,18 @@ if __name__ == "__main__":
 
     remote_server_uri = "https://dagshub.com/Trilokuday3/End_To_End_DATA_DRITF_Pipeline.mlflow"
     mlflow.set_tracking_uri(remote_server_uri)
-
     experiment_name = "TelcoChurnParamGridSearch"
     mlflow.set_experiment(experiment_name)
-
     model_map = {
         "LogisticRegression": LogisticRegression,
         "RandomForest": RandomForestClassifier,
         "XGBoost": XGBClassifier
     }
-
     os.makedirs("artifacts", exist_ok=True)
 
     for model_name, param_list in param_grid.items():
         for params in param_list:
             print(f"\n=== Running {model_name} with params: {params} ===\n")
-
             if model_name == "XGBoost":
                 params = params.copy()
                 params["use_label_encoder"] = False
@@ -114,7 +113,6 @@ if __name__ == "__main__":
             else:
                 params = params.copy()
                 params["random_state"] = 42
-
             classifier = model_map[model_name](**params)
             model = Pipeline(steps=[('preprocessor', preprocessor), ('classifier', classifier)])
 
@@ -122,9 +120,7 @@ if __name__ == "__main__":
                 model.fit(X_train, y_train)
                 y_pred = model.predict(X_test)
                 y_prob = model.predict_proba(X_test)[:, 1]
-
                 acc, rocauc, mse, rmse, mae, r2 = eval_metrics(y_test, y_pred, y_prob)
-
                 metrics_dict = {
                     "accuracy": acc,
                     "roc_auc": rocauc,
@@ -141,21 +137,62 @@ if __name__ == "__main__":
                 mlflow.log_param("model_type", model_name)
                 mlflow.log_params(params)
                 mlflow.log_metrics(metrics_dict)
-
                 # Save and log the model as artifact
-                model_path = os.path.join("artifacts", f"{model_name}_{str(params).replace(' ', '').replace(':', '').replace(',', '_')}_model.pkl")
-                joblib.dump(model, model_path)
-                mlflow.log_artifact(model_path, artifact_path="artifacts")
-                os.remove(model_path)
-
-                # ---------- START EVIDENTLY DATA DRIFT BLOCK ----------
-                drift_report_html = os.path.join(
-                    "artifacts", f"drift_report_{model_name}_{str(params).replace(' ', '').replace(':', '').replace(',', '_')}.html"
+                model_file = os.path.join("artifacts", f"{model_name}_{str(params).replace(' ', '').replace(':', '').replace(',', '_')}_model.pkl")
+                joblib.dump(model, model_file)
+                mlflow.log_artifact(model_file, artifact_path="artifacts")
+                os.remove(model_file)
+                # ---------- EVIDENTLY DRIFT REPORT (JSON) ----------
+                drift_report_json = os.path.join(
+                    "artifacts", f"drift_report_{model_name}_{str(params).replace(' ', '').replace(':', '').replace(',', '_')}.json"
                 )
+                drift_metrics = [ValueDrift(column=col) for col in X_train.columns]
+                if not drift_metrics:
+                    print("WARNING: No columns found for drift metrics!")
+                report = Report(metrics=drift_metrics)
+                try:
+                    report.run(reference_data=X_train, current_data=X_test)
+                except Exception as e:
+                    print("Evidently report error:", e)
+                 # ---------- EVIDENTLY DRIFT REPORT (JSON) ----------
+                drift_report_json = os.path.join(
+                    "artifacts", f"drift_report_{model_name}_{str(params).replace(' ', '').replace(':', '').replace(',', '_')}.json"
+                )
+                drift_metrics = [ValueDrift(column=col) for col in X_train.columns]
 
-                dashboard = Dashboard(tabs=[DataDriftTab()])
-                dashboard.calculate(reference_data=X_train, current_data=X_test)
-                dashboard.save(drift_report_html)
+                # Initialize drift_content to None to prevent NameError
+                drift_content = None 
 
-                mlflow.log_artifact(drift_report_html, artifact_path="artifacts")
-                # ---------- END EVIDENTLY DATA DRIFT BLOCK ----------
+                if not drift_metrics:
+                    print("WARNING: No columns found for drift metrics!")
+                
+                report = Report(metrics=drift_metrics)
+                
+                try:
+                    # Run the report
+                    report.run(reference_data=X_train, current_data=X_test)
+                    
+                    # The report object itself can be used for serialization
+                    drift_content = report 
+
+                except Exception as e:
+                    print(f"Evidently report error: {e}")
+
+                # Check if the report object (drift_content) was successfully created
+                if drift_content:
+                    with open(drift_report_json, "w", encoding="utf-8") as f:
+                        # Use json.dump to write the report object to the file
+                        json.dump(drift_content, f, indent=4) 
+                    print(f"Drift report saved: {drift_report_json}")
+                    mlflow.log_artifact(drift_report_json, artifact_path="artifacts")
+                    os.remove(drift_report_json)
+                else:
+                    print("WARNING: Drift report is empty and was not saved or logged.")
+                if drift_content:
+                    with open(drift_report_json, "w", encoding="utf-8") as f:
+                        json.dump(drift_content, f, indent=2)
+                    print(f"Drift report saved: {drift_report_json}")
+                    mlflow.log_artifact(drift_report_json, artifact_path="artifacts")
+                    os.remove(drift_report_json)
+                else:
+                    print("WARNING: Drift report is empty and was not saved or logged.")

@@ -16,3 +16,6 @@ catboost
 pyyaml
 loguru
 pytest
+evidently
+mlflow
+dagshub

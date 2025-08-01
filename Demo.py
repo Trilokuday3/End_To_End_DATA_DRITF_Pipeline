@@ -22,8 +22,6 @@ import joblib
 import dagshub
 import matplotlib.pyplot as plt
 from scipy.stats import ks_2samp, chi2_contingency
-from evidently.report import Report
-from evidently.metrics import DataDriftPreset
 
 dagshub.init(repo_owner='Trilokuday3', repo_name='End_To_End_DATA_DRITF_Pipeline-dagshub', mlflow=True)
 
