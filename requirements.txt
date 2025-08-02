@@ -16,6 +16,6 @@ catboost
 pyyaml
 loguru
 pytest
-evidently
+evidently ==0.4.12s
 mlflow
 dagshub
