@@ -25,11 +25,10 @@ import streamlit.components.v1 as components
 from evidently.metrics import (
     RegressionPredictedVsActualPlot,
     RegressionErrorDistribution,
-    RegressionErrorBiasTable
 )
+import traceback
 
-# --- Helper Function to Generate Reports ---
-# THIS IS THE FIX: The @st.cache_data decorator has been removed from this function.
+# Helper Function to Generate Reports
 def generate_evidently_report_html(metrics, current_data, reference_data, column_mapping):
     """Generates and returns the HTML for an Evidently report."""
     report = Report(metrics=metrics)
@@ -55,15 +54,19 @@ def load_data():
         df.drop(columns=['customerID'], inplace=True)
     return df
 
-df = load_data()
+df_loaded = load_data()
+df = df_loaded.copy()
 
 numeric_features = ['tenure', 'MonthlyCharges', 'TotalCharges']
 categorical_features = [col for col in df.columns if col not in numeric_features + ['Churn']]
 
+# Explicitly set data types to prevent ambiguity
+for col in categorical_features:
+    df[col] = df[col].astype(str)
+
 X = df.drop(columns=['Churn'])
 y = df['Churn']
 
-numeric_features = [feat for feat in numeric_features if feat in X.columns]
 X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=0.2, random_state=42, stratify=y
 )
@@ -82,40 +85,31 @@ st.sidebar.header("Select Model and Parameters")
 choice_idx = st.sidebar.selectbox("Choose a model configuration:", range(len(all_choices)), format_func=lambda idx: all_choices[idx][2])
 model_name, params, label = all_choices[choice_idx]
 
-# --- Preprocessing & Model Training Pipeline ---
+# --- Preprocessing & Model Training ---
 with st.spinner(f"Training {model_name}..."):
     numeric_transformer = Pipeline(steps=[('imputer', SimpleImputer(strategy='mean')), ('scaler', StandardScaler())])
-    categorical_transformer = Pipeline(steps=[('imputer', SimpleImputer(strategy='most_frequent')), ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))])
-    preprocessor = ColumnTransformer(transformers=[('num', numeric_transformer, numeric_features), ('cat', categorical_transformer, categorical_features)])
-
+    categorical_transformer = Pipeline(steps=[('imputer', SimpleImputer(strategy='most_frequent')), ('encoder', OneHotEncoder(handle_unknown='ignore'))])
+    preprocessor = ColumnTransformer(transformers=[('num', numeric_transformer, numeric_features), ('cat', categorical_transformer, categorical_features)], remainder='passthrough')
+    
     model_params = params.copy()
-    if model_name == "XGBoost":
-        model_params.update({"use_label_encoder": False, "eval_metric": "logloss"})
+    if model_name == "XGBoost": model_params.update({"use_label_encoder": False, "eval_metric": "logloss"})
     model_params["random_state"] = 42
     classifier = model_map[model_name](**model_params)
     model = Pipeline(steps=[('preprocessor', preprocessor), ('classifier', classifier)])
-
+    
     model.fit(X_train, y_train)
 
-# --- Prepare DataFrames with Predictions for ALL Evidently Reports ---
+# --- Prepare DataFrames with Predictions for all Reports ---
 y_train_pred = model.predict(X_train)
 y_train_pred_proba = model.predict_proba(X_train)[:, 1]
 y_test_pred = model.predict(X_test)
 y_test_pred_proba = model.predict_proba(X_test)[:, 1]
 
-current_data = X_test.copy()
-current_data['Churn'] = y_test
-current_data['prediction'] = y_test_pred
-current_data['prediction_proba'] = y_test_pred_proba
-
-reference_data = X_train.copy()
-reference_data['Churn'] = y_train
-reference_data['prediction'] = y_train_pred
-reference_data['prediction_proba'] = y_train_pred_proba
+current_data = X_test.copy(); current_data['Churn'] = y_test; current_data['prediction'] = y_test_pred; current_data['prediction_proba'] = y_test_pred_proba
+reference_data = X_train.copy(); reference_data['Churn'] = y_train; reference_data['prediction'] = y_train_pred; reference_data['prediction_proba'] = y_train_pred_proba
 
 # --- REPORT SECTION 1: Model Performance Report ---
 st.header("Evidently Model Performance Report")
-
 with st.spinner("Generating Performance Report..."):
     try:
         classification_mapping = ColumnMapping()
@@ -171,42 +165,50 @@ with col2:
         except Exception as e:
             st.error(f"Plot failed: {e}")
 
-# --- Error Bias Table Section ---
-st.subheader("Error Bias Analysis")
-st.write("Analyzes model performance across different segments of a feature to identify biases.")
+# --- REPORT SECTION 3: Manual Error Bias Analysis ---
+st.header("Manual Error Bias Analysis")
+st.write("This section manually calculates model performance for different data segments to robustly identify bias.")
+
+def display_manual_bias_analysis(feature_name, dataframe):
+    """Calculates and displays a manual error bias table using Pandas."""
+    if not feature_name:
+        return
+
+    st.markdown(f"#### Breakdown by **{feature_name}** on the Test Set")
+
+    if feature_name in numeric_features:
+        try:
+            dataframe[f'{feature_name}_bins'] = pd.cut(dataframe[feature_name], bins=5)
+            analysis_feature = f'{feature_name}_bins'
+        except Exception as e:
+            st.warning(f"Could not bin numerical feature '{feature_name}'. Error: {e}")
+            return
+    else:
+        analysis_feature = feature_name
+        
+    dataframe['error'] = dataframe['prediction_proba'] - dataframe['Churn']
+    
+    bias_report = dataframe.groupby(analysis_feature).agg(
+        Sample_Count=('Churn', 'count'),
+        Actual_Churn_Rate=('Churn', 'mean'),
+        Avg_Predicted_Prob=('prediction_proba', 'mean'),
+        Mean_Error_Bias=('error', 'mean'),
+    ).reset_index()
+
+    bias_report['Actual_Churn_Rate'] = bias_report['Actual_Churn_Rate'].map('{:.2%}'.format)
+    bias_report['Avg_Predicted_Prob'] = bias_report['Avg_Predicted_Prob'].map('{:.2%}'.format)
+    bias_report['Mean_Error_Bias'] = bias_report['Mean_Error_Bias'].map('{:+.4f}'.format)
+
+    st.dataframe(bias_report)
 
 col_num, col_cat = st.columns(2)
 
 with col_num:
-    st.markdown("#### Bias by Numerical Feature")
-    selected_num_feature = st.selectbox(
-        "Select a numerical feature:", options=[None] + numeric_features, key="num_bias"
-    )
-    if selected_num_feature:
-        with st.spinner(f"Generating bias report for {selected_num_feature}..."):
-            try:
-                report_html = generate_evidently_report_html(
-                    metrics=[RegressionErrorBiasTable(columns=[selected_num_feature])],
-                    current_data=current_data, reference_data=reference_data, column_mapping=regression_mapping
-                )
-                components.html(report_html, height=600, scrolling=True)
-            except Exception as e:
-                st.error(f"Could not generate bias table for '{selected_num_feature}': {e}")
+    selected_num_feature = st.selectbox("Select a numerical feature:", [None] + numeric_features, key="num_bias")
+    display_manual_bias_analysis(selected_num_feature, current_data.copy())
 
 with col_cat:
-    st.markdown("#### Bias by Categorical Feature")
-    selected_cat_feature = st.selectbox(
-        "Select a categorical feature:", options=[None] + categorical_features, key="cat_bias"
-    )
-    if selected_cat_feature:
-        with st.spinner(f"Generating bias report for {selected_cat_feature}..."):
-            try:
-                report_html = generate_evidently_report_html(
-                    metrics=[RegressionErrorBiasTable(columns=[selected_cat_feature])],
-                    current_data=current_data, reference_data=reference_data, column_mapping=regression_mapping
-                )
-                components.html(report_html, height=600, scrolling=True)
-            except Exception as e:
-                st.error(f"Could not generate bias table for '{selected_cat_feature}': {e}")
+    selected_cat_feature = st.selectbox("Select a categorical feature:", [None] + categorical_features, key="cat_bias")
+    display_manual_bias_analysis(selected_cat_feature, current_data.copy())
 
-st.caption("This dashboard uses Evidently 0.4.12.")
+st.caption("Error Bias Analysis is calculated manually with Pandas for robustness.")
