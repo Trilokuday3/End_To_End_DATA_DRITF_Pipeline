@@ -2,8 +2,9 @@
 __pycache__/
 *.py[codz]
 *$py.class
-notebooks/test.ipynb
+notebooks/test1.ipynb
 notebooks/test2.ipynb
+notebooks/test.ipynb
 # C extensions
 *.so
 
